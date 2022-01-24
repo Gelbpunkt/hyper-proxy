@@ -57,7 +57,7 @@
 mod stream;
 mod tunnel;
 
-use http::header::{HeaderMap, HeaderName, HeaderValue};
+use http::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, PROXY_AUTHORIZATION};
 use hyper::{service::Service, Uri};
 
 use futures_util::future::TryFutureExt;
@@ -79,7 +79,6 @@ use tokio_native_tls::TlsConnector;
 #[cfg(feature = "rustls-base")]
 use tokio_rustls::TlsConnector;
 
-use headers::{authorization::Credentials, Authorization, HeaderMapExt, ProxyAuthorization};
 #[cfg(feature = "openssl-tls")]
 use openssl::ssl::{SslConnector as OpenSslConnector, SslMethod};
 #[cfg(feature = "openssl-tls")]
@@ -193,18 +192,27 @@ impl Proxy {
     }
 
     /// Set `Proxy` authorization
-    pub fn set_authorization<C: Credentials + Clone>(&mut self, credentials: Authorization<C>) {
+    pub fn set_authorization(&mut self, username: &str, password: &str) {
+        let mut input = String::with_capacity(username.len() + 1 + password.len());
+        input.push_str(username);
+        input.push(':');
+        input.push_str(password);
+
+        let mut encoded = base64::encode(input);
+        encoded.insert_str(0, "Basic ");
+
+        let header_value = HeaderValue::from_str(&encoded).unwrap();
+
         match self.intercept {
             Intercept::Http => {
-                self.headers.typed_insert(Authorization(credentials.0));
+                self.headers.insert(AUTHORIZATION, header_value);
             }
             Intercept::Https => {
-                self.headers.typed_insert(ProxyAuthorization(credentials.0));
+                self.headers.insert(PROXY_AUTHORIZATION, header_value);
             }
             _ => {
-                self.headers
-                    .typed_insert(Authorization(credentials.0.clone()));
-                self.headers.typed_insert(ProxyAuthorization(credentials.0));
+                self.headers.insert(AUTHORIZATION, header_value.clone());
+                self.headers.insert(PROXY_AUTHORIZATION, header_value);
             }
         }
     }
@@ -442,7 +450,13 @@ where
         if let (Some(p), Some(host)) = (self.match_proxy(&uri), uri.host()) {
             if uri.scheme() == Some(&http::uri::Scheme::HTTPS) || p.force_connect {
                 let host = host.to_owned();
-                let port = uri.port_u16().unwrap_or(if uri.scheme() == Some(&http::uri::Scheme::HTTP) { 80 } else { 443 });
+                let port =
+                    uri.port_u16()
+                        .unwrap_or(if uri.scheme() == Some(&http::uri::Scheme::HTTP) {
+                            80
+                        } else {
+                            443
+                        });
                 let tunnel = tunnel::new(&host, port, &p.headers);
                 let connection =
                     proxy_dst(&uri, &p.uri).map(|proxy_url| self.connector.call(proxy_url));
