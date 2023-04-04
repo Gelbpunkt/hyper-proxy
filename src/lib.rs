@@ -57,6 +57,7 @@
 mod stream;
 mod tunnel;
 
+use base64::{engine::general_purpose::STANDARD, Engine};
 use http::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, PROXY_AUTHORIZATION};
 use hyper::{service::Service, Uri};
 
@@ -200,7 +201,7 @@ impl Proxy {
         input.push(':');
         input.push_str(password);
 
-        let mut encoded = base64::encode(input);
+        let mut encoded = STANDARD.encode(input);
         encoded.insert_str(0, "Basic ");
 
         let header_value = HeaderValue::from_str(&encoded).unwrap();
