@@ -1,31 +1,26 @@
+use hyper::rt::{Read, ReadBufCursor, Write};
+use hyper_util::rt::TokioIo;
 use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-#[cfg(feature = "rustls-base")]
+#[cfg(feature = "__rustls-base")]
 use tokio_rustls::client::TlsStream as RustlsStream;
 
-#[cfg(feature = "tls")]
+#[cfg(feature = "native-tls")]
 use tokio_native_tls::TlsStream;
 
-#[cfg(feature = "openssl-tls")]
-use tokio_openssl::SslStream as OpenSslStream;
+use hyper_util::client::legacy::connect::{Connected, Connection};
 
-use hyper::client::connect::{Connected, Connection};
-
-#[cfg(feature = "rustls-base")]
+#[cfg(feature = "__rustls-base")]
 pub type TlsStream<R> = RustlsStream<R>;
-
-#[cfg(feature = "openssl-tls")]
-pub type TlsStream<R> = OpenSslStream<R>;
 
 /// A Proxy Stream wrapper
 pub enum ProxyStream<R> {
     NoProxy(R),
     Regular(R),
-    #[cfg(any(feature = "tls", feature = "rustls-base", feature = "openssl-tls"))]
-    Secured(TlsStream<R>),
+    #[cfg(any(feature = "native-tls", feature = "__rustls-base"))]
+    Secured(TokioIo<TlsStream<TokioIo<R>>>),
 }
 
 macro_rules! match_fn_pinned {
@@ -33,7 +28,7 @@ macro_rules! match_fn_pinned {
         match $self.get_mut() {
             ProxyStream::NoProxy(s) => Pin::new(s).$fn($ctx, $buf),
             ProxyStream::Regular(s) => Pin::new(s).$fn($ctx, $buf),
-            #[cfg(any(feature = "tls", feature = "rustls-base", feature = "openssl-tls"))]
+            #[cfg(any(feature = "native-tls", feature = "__rustls-base"))]
             ProxyStream::Secured(s) => Pin::new(s).$fn($ctx, $buf),
         }
     };
@@ -42,23 +37,23 @@ macro_rules! match_fn_pinned {
         match $self.get_mut() {
             ProxyStream::NoProxy(s) => Pin::new(s).$fn($ctx),
             ProxyStream::Regular(s) => Pin::new(s).$fn($ctx),
-            #[cfg(any(feature = "tls", feature = "rustls-base", feature = "openssl-tls"))]
+            #[cfg(any(feature = "native-tls", feature = "__rustls-base"))]
             ProxyStream::Secured(s) => Pin::new(s).$fn($ctx),
         }
     };
 }
 
-impl<R: AsyncRead + AsyncWrite + Unpin> AsyncRead for ProxyStream<R> {
+impl<R: Read + Write + Unpin> Read for ProxyStream<R> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
+        buf: ReadBufCursor<'_>,
     ) -> Poll<io::Result<()>> {
         match_fn_pinned!(self, poll_read, cx, buf)
     }
 }
 
-impl<R: AsyncRead + AsyncWrite + Unpin> AsyncWrite for ProxyStream<R> {
+impl<R: Read + Write + Unpin> Write for ProxyStream<R> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -79,7 +74,7 @@ impl<R: AsyncRead + AsyncWrite + Unpin> AsyncWrite for ProxyStream<R> {
         match self {
             ProxyStream::NoProxy(s) => s.is_write_vectored(),
             ProxyStream::Regular(s) => s.is_write_vectored(),
-            #[cfg(any(feature = "tls", feature = "rustls-base", feature = "openssl-tls"))]
+            #[cfg(any(feature = "native-tls", feature = "__rustls-base"))]
             ProxyStream::Secured(s) => s.is_write_vectored(),
         }
     }
@@ -93,20 +88,22 @@ impl<R: AsyncRead + AsyncWrite + Unpin> AsyncWrite for ProxyStream<R> {
     }
 }
 
-impl<R: AsyncRead + AsyncWrite + Connection + Unpin> Connection for ProxyStream<R> {
+impl<R: Read + Write + Connection + Unpin> Connection for ProxyStream<R> {
     fn connected(&self) -> Connected {
         match self {
             ProxyStream::NoProxy(s) => s.connected(),
-
             ProxyStream::Regular(s) => s.connected().proxy(true),
-            #[cfg(feature = "tls")]
-            ProxyStream::Secured(s) => s.get_ref().get_ref().get_ref().connected().proxy(true),
-
-            #[cfg(feature = "rustls-base")]
-            ProxyStream::Secured(s) => s.get_ref().0.connected().proxy(true),
-
-            #[cfg(feature = "openssl-tls")]
-            ProxyStream::Secured(s) => s.get_ref().connected().proxy(true),
+            #[cfg(feature = "native-tls")]
+            ProxyStream::Secured(s) => s
+                .inner()
+                .get_ref()
+                .get_ref()
+                .get_ref()
+                .inner()
+                .connected()
+                .proxy(true),
+            #[cfg(feature = "__rustls-base")]
+            ProxyStream::Secured(s) => s.inner().get_ref().0.inner().connected().proxy(true),
         }
     }
 }

@@ -2,11 +2,11 @@
 //!
 //! # Example
 //! ```rust,no_run
-//! use hyper::{Client, Request, Uri, body::HttpBody};
-//! use hyper::client::HttpConnector;
+//! use http_body_util::{BodyExt, Empty};
+//! use hyper::{body::Bytes, Request, Uri};
+//! use hyper_util::{client::legacy::{Client, connect::HttpConnector}, rt::TokioExecutor};
 //! use futures_util::{TryFutureExt, TryStreamExt};
 //! use hyper_proxy::{Proxy, ProxyConnector, Intercept};
-//! use headers::Authorization;
 //! use std::error::Error;
 //! use tokio::io::{stdout, AsyncWriteExt as _};
 //!
@@ -15,11 +15,11 @@
 //!     let proxy = {
 //!         let proxy_uri = "http://my-proxy:8080".parse().unwrap();
 //!         let mut proxy = Proxy::new(Intercept::All, proxy_uri);
-//!         proxy.set_authorization(Authorization::basic("John Doe", "Agent1234"));
+//!         proxy.set_authorization("John Doe", "Agent1234");
 //!         let connector = HttpConnector::new();
-//!         # #[cfg(not(any(feature = "tls", feature = "rustls-base", feature = "openssl-tls")))]
+//!         # #[cfg(not(any(feature = "native-tls", feature = "__rustls-base")))]
 //!         # let proxy_connector = ProxyConnector::from_proxy_unsecured(connector, proxy);
-//!         # #[cfg(any(feature = "tls", feature = "rustls-base", feature = "openssl"))]
+//!         # #[cfg(any(feature = "native-tls", feature = "__rustls-base"))]
 //!         let proxy_connector = ProxyConnector::from_proxy(connector, proxy).unwrap();
 //!         proxy_connector
 //!     };
@@ -27,26 +27,22 @@
 //!     // Connecting to http will trigger regular GETs and POSTs.
 //!     // We need to manually append the relevant headers to the request
 //!     let uri: Uri = "http://my-remote-website.com".parse().unwrap();
-//!     let mut req = Request::get(uri.clone()).body(hyper::Body::empty()).unwrap();
+//!     let mut req = Request::get(uri.clone()).body(Empty::<Bytes>::new()).unwrap();
 //!
 //!     if let Some(headers) = proxy.http_headers(&uri) {
 //!         req.headers_mut().extend(headers.clone().into_iter());
 //!     }
 //!
-//!     let client = Client::builder().build(proxy);
+//!     let client = Client::builder(TokioExecutor::new()).build(proxy);
 //!     let mut resp = client.request(req).await?;
 //!     println!("Response: {}", resp.status());
-//!     while let Some(chunk) = resp.body_mut().data().await {
-//!         stdout().write_all(&chunk?).await?;
-//!     }
+//!     stdout().write_all(&resp.body_mut().collect().await?.to_bytes());
 //!
 //!     // Connecting to an https uri is straightforward (uses 'CONNECT' method underneath)
 //!     let uri = "https://my-remote-websitei-secured.com".parse().unwrap();
 //!     let mut resp = client.get(uri).await?;
 //!     println!("Response: {}", resp.status());
-//!     while let Some(chunk) = resp.body_mut().data().await {
-//!         stdout().write_all(&chunk?).await?;
-//!     }
+//!     stdout().write_all(&resp.body_mut().collect().await?.to_bytes());
 //!
 //!     Ok(())
 //! }
@@ -59,35 +55,28 @@ mod tunnel;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use http::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, PROXY_AUTHORIZATION};
-use hyper::{service::Service, Uri};
+use hyper::Uri;
 
 use futures_util::future::TryFutureExt;
+use hyper::rt::{Read, Write};
+use hyper_util::rt::TokioIo;
 use std::{fmt, io, sync::Arc};
 use std::{
     future::Future,
     pin::Pin,
     task::{Context, Poll},
 };
+use tower_service::Service;
 
 pub use stream::ProxyStream;
-use tokio::io::{AsyncRead, AsyncWrite};
 
-#[cfg(feature = "tls")]
-use native_tls::TlsConnector as NativeTlsConnector;
+#[cfg(feature = "native-tls")]
+use tokio_native_tls::TlsConnector as NativeTlsConnector;
 
-#[cfg(feature = "tls")]
-use tokio_native_tls::TlsConnector;
-#[cfg(feature = "rustls-base")]
-use tokio_rustls::TlsConnector;
-
-#[cfg(feature = "openssl-tls")]
-use openssl::ssl::{SslConnector as OpenSslConnector, SslMethod};
-#[cfg(feature = "rustls-base")]
+#[cfg(feature = "__rustls-base")]
 use std::convert::TryFrom;
-#[cfg(feature = "openssl-tls")]
-use tokio_openssl::SslStream;
-#[cfg(feature = "rustls-base")]
-use tokio_rustls::rustls::ServerName;
+#[cfg(feature = "__rustls-base")]
+use tokio_rustls::TlsConnector;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -252,16 +241,13 @@ pub struct ProxyConnector<C> {
     proxies: Vec<Proxy>,
     connector: C,
 
-    #[cfg(feature = "tls")]
+    #[cfg(feature = "native-tls")]
     tls: Option<NativeTlsConnector>,
 
-    #[cfg(feature = "rustls-base")]
+    #[cfg(feature = "__rustls-base")]
     tls: Option<TlsConnector>,
 
-    #[cfg(feature = "openssl-tls")]
-    tls: Option<OpenSslConnector>,
-
-    #[cfg(not(any(feature = "tls", feature = "rustls-base", feature = "openssl-tls")))]
+    #[cfg(not(any(feature = "native-tls", feature = "__rustls-base")))]
     tls: Option<()>,
 }
 
@@ -282,48 +268,38 @@ impl<C: fmt::Debug> fmt::Debug for ProxyConnector<C> {
 }
 
 impl<C> ProxyConnector<C> {
-    /// Create a new secured Proxies
-    #[cfg(feature = "tls")]
+    /// Create a new secured Proxy
+    #[cfg(feature = "native-tls")]
     pub fn new(connector: C) -> Result<Self, io::Error> {
-        let tls = NativeTlsConnector::builder()
+        let tls = native_tls::TlsConnector::builder()
             .build()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         Ok(ProxyConnector {
             proxies: Vec::new(),
             connector: connector,
-            tls: Some(tls),
+            tls: Some(tls.into()),
         })
     }
 
-    /// Create a new secured Proxies
-    #[cfg(feature = "rustls-base")]
+    /// Create a new secured Proxy
+    #[cfg(feature = "__rustls-base")]
     pub fn new(connector: C) -> Result<Self, io::Error> {
-        let config = tokio_rustls::rustls::ClientConfig::builder().with_safe_defaults();
+        let config = tokio_rustls::rustls::ClientConfig::builder();
 
-        #[cfg(feature = "rustls")]
+        #[cfg(feature = "rustls-native-roots")]
         let config = {
             let mut roots = tokio_rustls::rustls::RootCertStore::empty();
             for cert in rustls_native_certs::load_native_certs()? {
-                roots
-                    .add(&tokio_rustls::rustls::Certificate(cert.0))
-                    .map_err(io_err)?;
+                roots.add(cert).map_err(io_err)?;
             }
             config.with_root_certificates(roots).with_no_client_auth()
         };
 
-        #[cfg(feature = "rustls-webpki")]
+        #[cfg(feature = "rustls-webpki-roots")]
         let config = {
             let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
-            root_store.add_server_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.0.into_iter().map(
-                |ta| {
-                    tokio_rustls::rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(
-                        ta.subject,
-                        ta.spki,
-                        ta.name_constraints,
-                    )
-                },
-            ));
+            root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
             config
                 .with_root_certificates(root_store)
                 .with_no_client_auth()
@@ -331,20 +307,6 @@ impl<C> ProxyConnector<C> {
 
         let cfg = Arc::new(config);
         let tls = TlsConnector::from(cfg);
-
-        Ok(ProxyConnector {
-            proxies: Vec::new(),
-            connector: connector,
-            tls: Some(tls),
-        })
-    }
-
-    #[allow(missing_docs)]
-    #[cfg(feature = "openssl-tls")]
-    pub fn new(connector: C) -> Result<Self, io::Error> {
-        let builder = OpenSslConnector::builder(SslMethod::tls())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        let tls = builder.build();
 
         Ok(ProxyConnector {
             proxies: Vec::new(),
@@ -363,7 +325,7 @@ impl<C> ProxyConnector<C> {
     }
 
     /// Create a proxy connector and attach a particular proxy
-    #[cfg(any(feature = "tls", feature = "rustls-base", feature = "openssl-tls"))]
+    #[cfg(any(feature = "native-tls", feature = "__rustls-base"))]
     pub fn from_proxy(connector: C, proxy: Proxy) -> Result<Self, io::Error> {
         let mut c = ProxyConnector::new(connector)?;
         c.proxies.push(proxy);
@@ -387,20 +349,14 @@ impl<C> ProxyConnector<C> {
     }
 
     /// Set or unset tls when tunneling
-    #[cfg(any(feature = "tls"))]
+    #[cfg(any(feature = "native-tls"))]
     pub fn set_tls(&mut self, tls: Option<NativeTlsConnector>) {
         self.tls = tls;
     }
 
     /// Set or unset tls when tunneling
-    #[cfg(any(feature = "rustls-base"))]
+    #[cfg(any(feature = "__rustls-base"))]
     pub fn set_tls(&mut self, tls: Option<TlsConnector>) {
-        self.tls = tls;
-    }
-
-    /// Set or unset tls when tunneling
-    #[cfg(any(feature = "openssl-tls"))]
-    pub fn set_tls(&mut self, tls: Option<OpenSslConnector>) {
         self.tls = tls;
     }
 
@@ -448,7 +404,7 @@ macro_rules! mtry {
 impl<C> Service<Uri> for ProxyConnector<C>
 where
     C: Service<Uri>,
-    C::Response: AsyncRead + AsyncWrite + Send + Unpin + 'static,
+    C::Response: Read + Write + Send + Unpin + 'static,
     C::Future: Send + 'static,
     C::Error: Into<BoxError>,
 {
@@ -491,42 +447,33 @@ where
                         let tunnel_stream = mtry!(tunnel.with_stream(proxy_stream).await);
 
                         break match tls {
-                            #[cfg(feature = "tls")]
+                            #[cfg(feature = "native-tls")]
                             Some(tls) => {
-                                let tls = TlsConnector::from(tls);
-                                let secure_stream =
-                                    mtry!(tls.connect(&host, tunnel_stream).await.map_err(io_err));
+                                let tls = NativeTlsConnector::from(tls);
+                                let secure_stream = mtry!(tls
+                                    .connect(&host, TokioIo::new(tunnel_stream))
+                                    .await
+                                    .map_err(io_err));
 
-                                Ok(ProxyStream::Secured(secure_stream))
+                                Ok(ProxyStream::Secured(TokioIo::new(secure_stream)))
                             }
 
-                            #[cfg(feature = "rustls-base")]
+                            #[cfg(feature = "__rustls-base")]
                             Some(tls) => {
                                 let dnsref =
-                                    mtry!(ServerName::try_from(host.as_str()).map_err(io_err));
+                                    mtry!(webpki::types::ServerName::try_from(host.as_str())
+                                        .map_err(io_err))
+                                    .to_owned();
                                 let tls = TlsConnector::from(tls);
-                                let secure_stream =
-                                    mtry!(tls.connect(dnsref, tunnel_stream).await.map_err(io_err));
+                                let secure_stream = mtry!(tls
+                                    .connect(dnsref, TokioIo::new(tunnel_stream))
+                                    .await
+                                    .map_err(io_err));
 
-                                Ok(ProxyStream::Secured(secure_stream))
+                                Ok(ProxyStream::Secured(TokioIo::new(secure_stream)))
                             }
 
-                            #[cfg(feature = "openssl-tls")]
-                            Some(tls) => {
-                                let config = tls.configure().map_err(io_err)?;
-                                let ssl = config.into_ssl(&host).map_err(io_err)?;
-
-                                let mut stream = mtry!(SslStream::new(ssl, tunnel_stream));
-                                mtry!(Pin::new(&mut stream).connect().await.map_err(io_err));
-
-                                Ok(ProxyStream::Secured(stream))
-                            }
-
-                            #[cfg(not(any(
-                                feature = "tls",
-                                feature = "rustls-base",
-                                feature = "openssl-tls"
-                            )))]
+                            #[cfg(not(any(feature = "native-tls", feature = "__rustls-base",)))]
                             Some(_) => panic!("hyper-proxy was not built with TLS support"),
 
                             None => Ok(ProxyStream::Regular(tunnel_stream)),

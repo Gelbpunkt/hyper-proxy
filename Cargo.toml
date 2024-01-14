@@ -1,6 +1,6 @@
 [package]
 name = "hyper-proxy"
-version = "0.9.0"
+version = "0.10.0"
 authors = ["Johann Tuffe <tafia973@gmail.com>"]
 description = "A proxy connector for Hyper-based applications"
 
@@ -14,36 +14,33 @@ license = "MIT"
 edition = "2018"
 
 [dependencies]
+hyper = { version = "1", features = ["client"] }
+hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "tokio"] }
 tokio = { version = "1", features = ["io-std", "io-util"] }
-hyper = { version = "0.14", features = ["client"] }
-
 tower-service = "0.3"
-http = "0.2"
+http = "1"
 futures-util = { version = "0.3", default-features = false }
 base64 = "0.21"
 bytes = "1.0"
-hyper-tls = { version = "0.5.0", optional = true }
-tokio-native-tls = { version = "0.3.0", optional = true }
+hyper-tls = { version = "0.6", optional = true }
+tokio-native-tls = { version = "0.3", optional = true }
 native-tls = { version = "0.2", optional = true }
-openssl = { version = "0.10", optional = true }
-tokio-openssl = { version = "0.6", optional = true }
-tokio-rustls = { version = "0.24", optional = true }
-hyper-rustls = { version = "0.24", default-features = false, optional = true }
+tokio-rustls = { version = "0.25", optional = true, features = ["ring"] }
 
-webpki = { package = "rustls-webpki", version = "0.100", optional = true }
-rustls-native-certs = { version = "0.6", optional = true }
-webpki-roots = { version = "0.23", optional = true }
+webpki = { package = "rustls-webpki", version = "0.102", optional = true }
+rustls-native-certs = { version = "0.7", optional = true }
+webpki-roots = { version = "0.26", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1.0", features = ["full"] }
-hyper = { version = "0.14", features = ["client", "http1", "tcp"] }
+http-body-util = "0.1"
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
+tokio = { version = "1.0", features = ["macros", "net", "rt-multi-thread"] }
 
 [features]
-openssl-tls = ["openssl", "tokio-openssl"]
-tls = ["tokio-native-tls", "hyper-tls", "native-tls"]
-# note that `rustls-base` is not a valid feature on its own - it will configure rustls without root
+default = ["native-tls"]
+native-tls = ["dep:tokio-native-tls", "dep:hyper-tls", "dep:native-tls"]
+# note that `__rustls-base` is not a valid feature on its own - it will configure rustls without root
 # certificates!
-rustls-base = ["tokio-rustls", "hyper-rustls", "webpki"]
-rustls = ["rustls-base", "rustls-native-certs", "hyper-rustls/native-tokio"]
-rustls-webpki = ["rustls-base", "webpki-roots", "hyper-rustls/webpki-tokio"]
-default = ["tls"]
+__rustls-base = ["dep:tokio-rustls", "dep:webpki"]
+rustls-native-roots = ["__rustls-base", "dep:rustls-native-certs"]
+rustls-webpki-roots = ["__rustls-base", "dep:webpki-roots"]
