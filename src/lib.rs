@@ -285,10 +285,9 @@ impl<C> ProxyConnector<C> {
     /// Create a new secured Proxy
     #[cfg(feature = "__rustls-base")]
     pub fn new(connector: C) -> Result<Self, io::Error> {
-        let config = tokio_rustls::rustls::ClientConfig::builder();
-
         #[cfg(feature = "rustls-native-roots")]
         let config = {
+            let config = tokio_rustls::rustls::ClientConfig::builder();
             let mut roots = tokio_rustls::rustls::RootCertStore::empty();
             for cert in rustls_native_certs::load_native_certs()? {
                 roots.add(cert).map_err(io_err)?;
@@ -298,12 +297,16 @@ impl<C> ProxyConnector<C> {
 
         #[cfg(feature = "rustls-webpki-roots")]
         let config = {
+            let config = tokio_rustls::rustls::ClientConfig::builder();
             let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
             root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
             config
                 .with_root_certificates(root_store)
                 .with_no_client_auth()
         };
+
+        #[cfg(feature = "rustls-platform-verifier")]
+        let config = rustls_platform_verifier::tls_config();
 
         let cfg = Arc::new(config);
         let tls = TlsConnector::from(cfg);

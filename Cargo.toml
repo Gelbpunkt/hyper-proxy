@@ -20,16 +20,16 @@ tokio = { version = "1", features = ["io-std", "io-util"] }
 tower-service = "0.3"
 http = "1"
 futures-util = { version = "0.3", default-features = false }
-base64 = "0.21"
+base64 = "0.22"
 bytes = "1.0"
-hyper-tls = { version = "0.6", optional = true }
 tokio-native-tls = { version = "0.3", optional = true }
 native-tls = { version = "0.2", optional = true }
-tokio-rustls = { version = "0.25", optional = true, features = ["ring"] }
+tokio-rustls = { version = "0.26", optional = true, features = ["ring"] }
 
 webpki = { package = "rustls-webpki", version = "0.102", optional = true }
 rustls-native-certs = { version = "0.7", optional = true }
 webpki-roots = { version = "0.26", optional = true }
+rustls-platform-verifier = { version = "0.3", optional = true }
 
 [dev-dependencies]
 http-body-util = "0.1"
@@ -38,9 +38,10 @@ tokio = { version = "1.0", features = ["macros", "net", "rt-multi-thread"] }
 
 [features]
 default = ["native-tls"]
-native-tls = ["dep:tokio-native-tls", "dep:hyper-tls", "dep:native-tls"]
+native-tls = ["dep:tokio-native-tls", "dep:native-tls"]
 # note that `__rustls-base` is not a valid feature on its own - it will configure rustls without root
 # certificates!
 __rustls-base = ["dep:tokio-rustls", "dep:webpki"]
 rustls-native-roots = ["__rustls-base", "dep:rustls-native-certs"]
 rustls-webpki-roots = ["__rustls-base", "dep:webpki-roots"]
+rustls-platform-verifier = ["__rustls-base", "dep:rustls-platform-verifier"]
