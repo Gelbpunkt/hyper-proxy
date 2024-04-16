@@ -50,6 +50,12 @@
 
 #![allow(missing_docs)]
 
+#[cfg(all(
+    feature = "__rustls-base",
+    not(any(feature = "aws_lc_rs", feature = "ring"))
+))]
+compile_error!("rustls features require a crypto provider");
+
 mod stream;
 mod tunnel;
 
@@ -285,28 +291,40 @@ impl<C> ProxyConnector<C> {
     /// Create a new secured Proxy
     #[cfg(feature = "__rustls-base")]
     pub fn new(connector: C) -> Result<Self, io::Error> {
+        #[cfg(feature = "ring")]
+        let crypto_provider = tokio_rustls::rustls::crypto::ring::default_provider().into();
+        #[cfg(feature = "aws_lc_rs")]
+        let crypto_provider = tokio_rustls::rustls::crypto::aws_lc_rs::default_provider().into();
+
         #[cfg(feature = "rustls-native-roots")]
         let config = {
-            let config = tokio_rustls::rustls::ClientConfig::builder();
+            let config = tokio_rustls::rustls::ClientConfig::builder_with_provider(crypto_provider);
             let mut roots = tokio_rustls::rustls::RootCertStore::empty();
             for cert in rustls_native_certs::load_native_certs()? {
                 roots.add(cert).map_err(io_err)?;
             }
-            config.with_root_certificates(roots).with_no_client_auth()
+            config
+                .with_safe_default_protocol_versions()
+                .map_err(io_err)?
+                .with_root_certificates(roots)
+                .with_no_client_auth()
         };
 
         #[cfg(feature = "rustls-webpki-roots")]
         let config = {
-            let config = tokio_rustls::rustls::ClientConfig::builder();
+            let config = tokio_rustls::rustls::ClientConfig::builder_with_provider(crypto_provider);
             let mut root_store = tokio_rustls::rustls::RootCertStore::empty();
             root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
             config
+                .with_safe_default_protocol_versions()
+                .map_err(io_err)?
                 .with_root_certificates(root_store)
                 .with_no_client_auth()
         };
 
         #[cfg(feature = "rustls-platform-verifier")]
-        let config = rustls_platform_verifier::tls_config();
+        let config =
+            rustls_platform_verifier::tls_config_with_provider(crypto_provider).map_err(io_err)?;
 
         let cfg = Arc::new(config);
         let tls = TlsConnector::from(cfg);

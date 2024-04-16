@@ -24,7 +24,7 @@ base64 = "0.22"
 bytes = "1.0"
 tokio-native-tls = { version = "0.3", optional = true }
 native-tls = { version = "0.2", optional = true }
-tokio-rustls = { version = "0.26", optional = true, features = ["ring"] }
+tokio-rustls = { version = "0.26", optional = true, default-features = false }
 
 webpki = { package = "rustls-webpki", version = "0.102", optional = true }
 rustls-native-certs = { version = "0.7", optional = true }
@@ -45,3 +45,8 @@ __rustls-base = ["dep:tokio-rustls", "dep:webpki"]
 rustls-native-roots = ["__rustls-base", "dep:rustls-native-certs"]
 rustls-webpki-roots = ["__rustls-base", "dep:webpki-roots"]
 rustls-platform-verifier = ["__rustls-base", "dep:rustls-platform-verifier"]
+rustls-tls12 = ["tokio-rustls?/tls12"]
+ring = ["tokio-rustls?/ring"]
+aws_lc_rs = ["tokio-rustls?/aws_lc_rs"]
+aws-lc-rs = ["aws_lc_rs"]
+fips = ["tokio-rustls?/fips"]
